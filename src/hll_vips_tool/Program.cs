@@ -143,7 +143,7 @@ namespace hll_vips_tool
 
                     vips.AddRange(vipsRaw.Split('\t', StringSplitOptions.RemoveEmptyEntries).Skip(1));
 
-                    Console.WriteLine($"VIP imported");
+                    Console.WriteLine($"VIP Exported.");
                 }
                 catch (Exception ex)
                 {
