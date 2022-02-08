@@ -1,4 +1,6 @@
-﻿using Newtonsoft.Json;
+﻿using CommandLine;
+using CsvHelper;
+using Newtonsoft.Json;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -11,16 +13,40 @@ using System.Threading.Tasks;
 
 namespace hll_vips_tool
 {
-    class Program
+    public class Program
     {
-        public const string VipFile = "vips.txt";
+        public const string VipFile = "vips.csv";
         public const string ServerFile = "servers.json";
 
         static async Task Main(string[] args)
         {
+            await Parser
+                .Default
+                .ParseArguments<Options>(args)
+                .WithParsedAsync(async o =>
+                {
+                    if (o.Mode == ToolMode.Tool)
+                    {
+                        await RunToolMode();
+                    }
+                    else
+                    {
+                        while (true)
+                        {
+                            await RunServerMode();
+
+                            await Task.Delay(TimeSpan.FromMinutes(o.Delay));
+                        }
+                    }
+                });
+
+            Console.ForegroundColor = ConsoleColor.White;
+        }
+
+        private static async Task RunToolMode()
+        {
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("Welcome to HLL VIP tool");
-
             List<Server> servers = new List<Server>();
 
             if (File.Exists(ServerFile))
@@ -73,6 +99,31 @@ namespace hll_vips_tool
             Console.ForegroundColor = ConsoleColor.Green;
             Console.WriteLine("Done. Press any key to close.");
             Console.ReadKey();
+        }
+
+        private static async Task RunServerMode()
+        {
+            List<Server> servers = new List<Server>();
+
+            if (!File.Exists(VipFile))
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine($"No {VipFile} present. Cannot run server mode.");
+                return;
+            }
+
+            if (File.Exists(ServerFile))
+            {
+                servers.AddRange(JsonConvert.DeserializeObject<List<Server>>(File.ReadAllText(ServerFile)));
+            }
+            if (!servers.Any())
+            {
+                Console.ForegroundColor = ConsoleColor.Red;
+                Console.WriteLine("No servers configured. Cannot run server mode.");
+                return;
+            }
+
+            await InnerImport(servers);
         }
 
         private static async Task AddServer(List<Server> servers)
@@ -154,14 +205,30 @@ namespace hll_vips_tool
 
             if (vips.Any())
             {
-                var allVips = string.Join('\n', vips.Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(s => s));
-
                 if (File.Exists(VipFile))
                 {
                     File.Delete(VipFile);
                 }
 
-                File.WriteAllText(VipFile, allVips);
+                var vipRecords = vips
+                    .Distinct(StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(s => s)
+                    .Where(v => !string.IsNullOrWhiteSpace(v))
+                    .Select(raw =>
+                    {
+                        var parts = raw.Split(' ', 2);
+                        return new VipRecord
+                        {
+                            Name = parts[1].Replace("\"", ""),
+                            SteamId = parts[0],
+                        };
+                    });
+
+                using (var writer = new StreamWriter(VipFile))
+                using (var csv = new CsvWriter(writer, CultureInfo.InvariantCulture))
+                {
+                    csv.WriteRecords<VipRecord>(vipRecords);
+                }
             }
         }
 
@@ -178,8 +245,19 @@ namespace hll_vips_tool
             Console.WriteLine($"Do you want to delete all and import or only add vips (y/n)? (y = delete all, make sure ALL desired vips are in {VipFile} file");
 
             var answer = Console.ReadLine();
+            await InnerImport(servers, answer);
+        }
 
-            var vips = File.ReadAllLines(VipFile);
+        private static async Task InnerImport(List<Server> servers, string answer = "y")
+        {
+            List<VipRecord> vips = new List<VipRecord>();
+
+            using (var reader = new StreamReader(VipFile))
+            using (var csv = new CsvReader(reader, CultureInfo.InvariantCulture))
+            {
+                vips = csv.GetRecords<VipRecord>().ToList();
+            }
+
 
             foreach (var server in servers)
             {
@@ -227,19 +305,17 @@ namespace hll_vips_tool
                 Console.ForegroundColor = ConsoleColor.White;
                 foreach (var vip in vips)
                 {
-                    var parts = vip.Split(' ', 2);
-
-                    if (serverVips.Any(s => s.Contains(parts[0])))
+                    if (serverVips.Any(s => s.Contains(vip.SteamId)))
                     {
-                        Console.WriteLine($"skipping VIP " + vip);
+                        Console.WriteLine($"skipping VIP " + vip.Name);
                         continue;
                     }
 
-                    Console.WriteLine($"Adding VIP " + vip);
-                    SendMessage(client, xor, $"vipadd {parts[0]} \"{parts[1].Replace("\"", "").Trim()}\"");
+                    Console.WriteLine($"Adding VIP " + vip.Name);
+                    SendMessage(client, xor, $"vipadd {vip.SteamId} \"{vip.Name.Replace("\"", "").Trim()}\"");
                     await ReceiveMessage(client, xor, true);
                 }
-                
+
             }
         }
 
@@ -270,7 +346,7 @@ namespace hll_vips_tool
 
             var toDelete = servers.FirstOrDefault(s => s.Id == id);
 
-            if(toDelete is null)
+            if (toDelete is null)
             {
 
                 Console.ForegroundColor = ConsoleColor.Red;
@@ -322,7 +398,7 @@ namespace hll_vips_tool
 
             do
             {
-                receivedBytes = await ReceiveBytes(client, xor, decrypted, crash) ;
+                receivedBytes = await ReceiveBytes(client, xor, decrypted, crash);
                 if (receivedBytes == null)
                 {
                     return null;
@@ -391,6 +467,27 @@ namespace hll_vips_tool
             }
         }
 
+    }
+
+    public class Options
+    {
+        [Option('m', "mode", Required = false, HelpText = "Default is Tool : Runs once. Use Server mode to periodically run the tool on a set of servers", Default = ToolMode.Tool)]
+        public ToolMode Mode { get; set; }
+
+        [Option('d', "delay", Required = false, Default = 15, HelpText = "Dealy in minutes between each VIP sync")]
+        public int Delay { get; set; }
+    }
+
+    public enum ToolMode
+    {
+        Tool,
+        Server
+    }
+
+    public class VipRecord
+    {
+        public string Name { get; set; }
+        public string SteamId { get; set; }
     }
 
     class Server
